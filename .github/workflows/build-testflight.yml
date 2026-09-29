@@ -1,0 +1,85 @@
+name: Build and TestFlight
+
+# Godot（Windows）で書き出した Xcode プロジェクト（build/ios を tools/ios_post.py で仕上げたもの）を
+# zip にして Release に置き、ここ（macOS）で署名して TestFlight へ上げる（THE UNNUMBERED 鎖の軍団）。
+# 署名は「ASC API キー＋自動署名（クラウド管理の配布証明書）」。
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "ios-xcode.zip を置いた Release のタグ"
+        required: true
+        default: "xcode"
+      upload_testflight:
+        description: "TestFlightへアップロード"
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  testflight:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download Xcode project from Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.release_tag }}" -p 'ios-xcode*.zip' -D dl
+          mkdir xcode
+          tar -xf dl/ios-xcode*.zip -C xcode
+          ls xcode
+          test -d xcode/Unnumbered.xcodeproj
+
+      - name: Install App Store Connect key
+        env:
+          ASC_API_KEY_CONTENT: ${{ secrets.ASC_API_KEY_CONTENT }}
+        run: |
+          test -n "$ASC_API_KEY_CONTENT"
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$ASC_API_KEY_CONTENT" | base64 -D > ~/.appstoreconnect/private_keys/AuthKey_WDXGY9WX55.p8
+
+      - name: Archive
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild archive \
+            -project xcode/Unnumbered.xcodeproj \
+            -scheme Unnumbered \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath build/Unnumbered.xcarchive \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
+            CODE_SIGN_STYLE=Automatic \
+            CODE_SIGN_IDENTITY="Apple Development" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            DEVELOPMENT_TEAM=83VGKGSQUH \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_WDXGY9WX55.p8 \
+            -authenticationKeyID WDXGY9WX55 \
+            -authenticationKeyIssuerID 2be0734f-943a-4d61-9dc9-5d9045c46fec \
+            > build/archive.log 2>&1 || { grep -E "error:|\*\* " build/archive.log | tail -60; exit 1; }
+          grep -E "ARCHIVE SUCCEEDED" build/archive.log | tail -3
+          /usr/libexec/PlistBuddy -c "Print" build/Unnumbered.xcarchive/Products/Applications/*.app/Info.plist | grep -E "CFBundle(Version|ShortVersionString|Identifier|DisplayName)"
+
+      - name: Upload archive log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archive-log
+          path: build/archive.log
+          if-no-files-found: ignore
+
+      - name: Export and upload to TestFlight
+        if: inputs.upload_testflight
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath build/Unnumbered.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist export_options.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_WDXGY9WX55.p8 \
+            -authenticationKeyID WDXGY9WX55 \
+            -authenticationKeyIssuerID 2be0734f-943a-4d61-9dc9-5d9045c46fec
